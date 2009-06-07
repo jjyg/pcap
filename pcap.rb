@@ -89,7 +89,7 @@ module Pcap
 			@eth = Ethernet.from(Sbuf.new(cap.read(rawlen)))
 		end
 		def inspect
-			"<pcap time=#@time length=#@length\n#{@eth.inspect}>"
+			"<pcap time=#@time-#{Time.at(@time).strftime('%d/%m/%Y %H:%M:%S') rescue nil} length=#@length\n#{@eth.inspect}>"
 		end
 	end
 
@@ -122,7 +122,7 @@ module Pcap
 		def interpret(data)
 			b = data.readbyte
 			@vers = b >> 4
-			hdrlen = b & 0xf
+			hdrlen = (b & 0xf) * 4
 			tos = data.readbyte
 			len = data.readshort
 			@id = data.readshort
@@ -135,7 +135,7 @@ module Pcap
 			@src = data.read(4)
 			@dst = data.read(4)
 			@opts = data.read(hdrlen-data.pos)
-			data = data.readsub
+			data = data.readsub(len-data.pos)
 			@pld = case @proto
 			when 6: TCP.from(data)
 			when 17: UDP.from(data)
@@ -165,9 +165,13 @@ module Pcap
 			@opts = data.read(doff-data.pos)
 			@pld = data.read
 		end
+		def flags_s
+			# to_s(2) is not rjust(8)
+			%w[cwr ece urg ack psh rst syn fin].reverse.zip(@flags.to_s(2).split(//).reverse).map { |f, b| f if b == '1' }.compact.join(',')
+		end
 
 		def inspect
-			"<tcp sport=#@sport dport=#@dport seq=#{@seq.h} flag=#{@flags.h}\n#{@pld.inspect}>"
+			"<tcp sport=#@sport dport=#@dport seq=#{@seq.h} flag=#{@flags.h}-#{flags_s}\n#{@pld.inspect}>"
 		end
 	end
 
