@@ -121,7 +121,7 @@ module Pcap
 			@src  = data.read(6).h.scan(/../).join(':')
 			@dst  = data.read(6).h.scan(/../).join(':')
 			@type = data.readshort
-			@ip   = parse_payload(data.readsub(-5))
+			@ip   = parse_payload(data.readsub) #readsub(-5)
 			crc  = data.readlong
 		end
 
@@ -153,8 +153,7 @@ module Pcap
 			@src = data.read(4).unpack('C*').join('.')
 			@dst = data.read(4).unpack('C*').join('.')
 			@opts = data.read(hdrlen-data.pos)
-			data = data.readsub(len-data.pos)
-			@pld = parse_payload(data)
+			@pld = parse_payload(data.readsub(len-data.pos))
 		end
 
 		def parse_payload(data)
@@ -185,7 +184,7 @@ module Pcap
 			cksum = data.readshort
 			@urgent = data.readshort
 			@opts = data.read(doff-data.pos)
-			@pld = parse_payload(data)
+			@pld = parse_payload(data.readsub)
 		end
 		def flags_s
 			i = -1 ; %w[fin syn rst psh ack urg ece cwr].find_all { @flags[i+=1] > 0 }
@@ -221,19 +220,23 @@ module Pcap
 			cksum = data.readshort
 			@id   = data.readshort
 			@seq  = data.readshort
-			@pld  = parse_payload(data)
+			@pld  = parse_payload(data.readsub)
 		end
 
 		def inspect
 			"<icmp type=#@type code=#@code id=#@id seq=#@seq\n#{@pld.inspect}>"
 		end
 	end
+
+	def self.dump_cli
+		abort "usage: #$0 <pcapfile>" if ARGV.empty?
+		p pc = Capture.from(ARGF)
+		p pc.readpacket until pc.eof?
+	end
 end
 
 if __FILE__ == $0
-	abort 'usage: pcap.rb <pcapfile>' if ARGV.empty?
-	p pc = Pcap::Capture.from(ARGF)
-	p pc.readpacket until pc.eof?
+	Pcap.dump_cli
 end
 
 __END__
