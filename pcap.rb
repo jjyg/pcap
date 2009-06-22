@@ -86,8 +86,19 @@ module Pcap
 			@time += cap.readlong / 1_000_000.0
 			@length = cap.readlong
 			rawlen = cap.readlong
-			@eth = Ethernet.from(Sbuf.new(cap.read(rawlen)))
+			@eth = interpret(Sbuf.new(cap.read(rawlen)))
 		end
+
+		def interpret(data)
+			Ethernet.from(data)
+		end
+
+		def ip; eth.ip end
+		def pld; eth.ip.pld end
+		def tcp; pld if pld.kind_of? TCP end
+		def udp; pld if pld.kind_of? UDP end
+		def icmp; pld if pld.kind_of? ICMP end
+
 		def inspect
 			"<pcap time=#@time-#{Time.at(@time).strftime('%d/%m/%Y %H:%M:%S') rescue nil} length=#@length\n#{@eth.inspect}>"
 		end
@@ -99,20 +110,27 @@ module Pcap
 			n.interpret(str)
 			n
 		end
+		def parse_payload(data)
+			data.read
+		end
 	end
 
 	class Ethernet < Proto
 		attr_accessor :src, :dst, :type, :ip
 		def interpret(data)
-			@src  = data.read(6)
-			@dst  = data.read(6)
+			@src  = data.read(6).h.scan(/../).join(':')
+			@dst  = data.read(6).h.scan(/../).join(':')
 			@type = data.readshort
-			@ip   = IP.from(data.readsub(-5))
+			@ip   = parse_payload(data.readsub(-5))
 			crc  = data.readlong
 		end
 
+		def parse_payload(data)
+			IP.from data
+		end
+
 		def inspect
-			"<eth src=#{@src.h.scan(/../).join(':')} dst=#{@dst.h.scan(/../).join(':')} type=#{@type.h}\n#{@ip.inspect}>"
+			"<eth src=#@src dst=#@dst type=#{@type.h}\n#{@ip.inspect}>"
 		end
 	end
 
@@ -132,20 +150,24 @@ module Pcap
 			@ttl = data.readbyte
 			@proto = data.readbyte
 			hcksum = data.readshort
-			@src = data.read(4)
-			@dst = data.read(4)
+			@src = data.read(4).unpack('C*').join('.')
+			@dst = data.read(4).unpack('C*').join('.')
 			@opts = data.read(hdrlen-data.pos)
 			data = data.readsub(len-data.pos)
-			@pld = case @proto
+			@pld = parse_payload(data)
+		end
+
+		def parse_payload(data)
+		       	case @proto
 			when 6: TCP.from(data)
 			when 17: UDP.from(data)
 			when 1: ICMP.from(data)
-			else data.read
+			else super(data)
 			end
 		end
 
 		def inspect
-			"<ip src=#{@src.unpack('C*').join('.')} dst=#{@dst.unpack('C*').join('.')} id=#{@id.h} flag=#@flag proto=#@proto\n#{@pld.inspect}>"
+			"<ip src=#@src dst=#@dst id=#{@id.h} flag=#@flag proto=#@proto\n#{@pld.inspect}>"
 		end
 	end
 
@@ -158,20 +180,19 @@ module Pcap
 			@seq = data.readlong
 			@ack = data.readlong
 			doff = data.readbyte >> 4 << 2
-			@flags = data.readbyte	# hi->lo: cwr ece urg ack psh rst syn fin
+			@flags = data.readbyte
 			@wsz = data.readshort
 			cksum = data.readshort
 			@urgent = data.readshort
 			@opts = data.read(doff-data.pos)
-			@pld = data.read
+			@pld = parse_payload(data)
 		end
 		def flags_s
-			# to_s(2) is not rjust(8)
-			%w[cwr ece urg ack psh rst syn fin].reverse.zip(@flags.to_s(2).split(//).reverse).map { |f, b| f if b == '1' }.compact.join(',')
+			i = -1 ; %w[fin syn rst psh ack urg ece cwr].find_all { @flags[i+=1] > 0 }
 		end
 
 		def inspect
-			"<tcp sport=#@sport dport=#@dport seq=#{@seq.h} flag=#{@flags.h}-#{flags_s}\n#{@pld.inspect}>"
+			"<tcp sport=#@sport dport=#@dport seq=#{@seq.h} flag=#{@flags.h}-#{flags_s*','}\n#{@pld.inspect}>"
 		end
 	end
 
@@ -183,7 +204,7 @@ module Pcap
 			@dport = data.readshort
 			len = data.readshort
 			cksum = data.readshort
-			@pld = data.read(len-8)
+			@pld = parse_payload(data.readsub(len-8))
 		end
 
 		def inspect
@@ -200,7 +221,7 @@ module Pcap
 			cksum = data.readshort
 			@id   = data.readshort
 			@seq  = data.readshort
-			@pld = data.read
+			@pld  = parse_payload(data)
 		end
 
 		def inspect
