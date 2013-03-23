@@ -95,9 +95,9 @@ module Pcap
 
 		def ip; eth.ip end
 		def pld; eth.ip.pld end
-		def tcp; pld if pld.kind_of? TCP end
-		def udp; pld if pld.kind_of? UDP end
-		def icmp; pld if pld.kind_of? ICMP end
+		def tcp; pld if pld.kind_of?(TCP) end
+		def udp; pld if pld.kind_of?(UDP) end
+		def icmp; pld if pld.kind_of?(ICMP) end
 
 		def inspect
 			"<pcap time=#@time-#{Time.at(@time).strftime('%d/%m/%Y %H:%M:%S') rescue nil} length=#@length\n#{@eth.inspect}>"
@@ -116,13 +116,13 @@ module Pcap
 	end
 
 	class Ethernet < Proto
-		attr_accessor :src, :dst, :type, :ip
+		attr_accessor :src, :dst, :type, :ip, :crc
 		def interpret(data)
 			@src  = data.read(6).h.scan(/../).join(':')
 			@dst  = data.read(6).h.scan(/../).join(':')
 			@type = data.readshort
 			@ip   = parse_payload(data.readsub) #readsub(-5)
-			crc  = data.readlong unless data.eos?
+			@crc  = data.readlong unless data.eos?
 		end
 
 		def parse_payload(data)
@@ -135,21 +135,21 @@ module Pcap
 	end
 
 	class IP < Proto
-		attr_accessor :vers, :id, :flag, :frag, :ttl, :proto, :src, :dst, :opts, :pld
+		attr_accessor :vers, :tos, :id, :flag, :frag, :ttl, :proto, :hcksum, :src, :dst, :opts, :pld
 
 		def interpret(data)
 			b = data.readbyte
 			@vers = b >> 4
 			hdrlen = (b & 0xf) * 4
-			tos = data.readbyte
+			@tos = data.readbyte
 			len = data.readshort
 			@id = data.readshort
 			@frag = data.readshort
-			@flag = @frag >> 14
-			@frag &= 0x3fff
+			@flag = @frag >> 13
+			@frag &= 0x1fff
 			@ttl = data.readbyte
 			@proto = data.readbyte
-			hcksum = data.readshort
+			@hcksum = data.readshort
 			@src = data.read(4).unpack('C*').join('.')
 			@dst = data.read(4).unpack('C*').join('.')
 			@opts = data.read(hdrlen-data.pos)
@@ -166,22 +166,23 @@ module Pcap
 		end
 
 		def inspect
-			"<ip src=#@src dst=#@dst id=#{@id.h} flag=#@flag proto=#@proto\n#{@pld.inspect}>"
+			"<ip src=#@src dst=#@dst id=#{@id.h} flag=#@flag frag=#@frag ttl=#@ttl proto=#@proto tos=#@tos #{@opts.inspect if @opts.length > 0}\n#{@pld.inspect}>"
 		end
 	end
 
 	class TCP < Proto
-		attr_accessor :sport, :dport, :seq, :ack, :flags, :wsz, :urgent, :opts, :pld
+		attr_accessor :sport, :dport, :seq, :ack, :doff, :flags, :wsz, :cksum, :urgent, :opts, :pld
 
 		def interpret(data)	
 			@sport = data.readshort
 			@dport = data.readshort
 			@seq = data.readlong
 			@ack = data.readlong
-			doff = data.readbyte >> 4 << 2
+			@doff = data.readbyte
+			doff = @doff >> 4 << 2
 			@flags = data.readbyte
 			@wsz = data.readshort
-			cksum = data.readshort
+			@cksum = data.readshort
 			@urgent = data.readshort
 			@opts = data.read(doff-data.pos)
 			@pld = parse_payload(data.readsub)
@@ -191,18 +192,18 @@ module Pcap
 		end
 
 		def inspect
-			"<tcp sport=#@sport dport=#@dport seq=#{@seq.h} flag=#{@flags.h}-#{flags_s*','}\n#{@pld.inspect}>"
+			"<tcp sport=#@sport dport=#@dport seq=#{@seq.h} ack=#{@ack.h} flag=#{@flags.h}-#{flags_s*','} doff=#@doff #{@opts.inspect if @opts.length > 0}\n#{@pld.inspect}>"
 		end
 	end
 
 	class UDP < Proto
-		attr_accessor :sport, :dport, :pld
+		attr_accessor :sport, :dport, :cksum, :pld
 
 		def interpret(data)	
 			@sport = data.readshort
 			@dport = data.readshort
 			len = data.readshort
-			cksum = data.readshort
+			@cksum = data.readshort
 			@pld = parse_payload(data.readsub(len-8))
 		end
 
@@ -212,19 +213,19 @@ module Pcap
 	end
 
 	class ICMP < Proto
-		attr_accessor :type, :code, :id, :seq, :pld
+		attr_accessor :type, :code, :cksum, :id, :seq, :pld
 
 		def interpret(data)
 			@type = data.readbyte
 			@code = data.readbyte
-			cksum = data.readshort
+			@cksum = data.readshort
 			@id   = data.readshort
 			@seq  = data.readshort
 			@pld  = parse_payload(data.readsub)
 		end
 
 		def inspect
-			"<icmp type=#@type code=#@code id=#@id seq=#@seq\n#{@pld.inspect}>"
+			"<icmp type=#@type code=#@code id=#{@id.h} seq=#@seq\n#{@pld.inspect}>"
 		end
 	end
 
