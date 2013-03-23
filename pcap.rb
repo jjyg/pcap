@@ -15,7 +15,7 @@ module Pcap
 			@str = str
 		end
 		def read(len=-1)
-			puts "short string!" if $VERBOSE and eos?
+			puts "short string!" if $VERBOSE and eos? and len > 0
 			# len < 0 -> read up to len (-1 = read all)
 			len = @str.length + len + 1 - @pos if len < 0
 			@pos += len
@@ -122,7 +122,7 @@ module Pcap
 			@dst  = data.read(6).h.scan(/../).join(':')
 			@type = data.readshort
 			@ip   = parse_payload(data.readsub) #readsub(-5)
-			crc  = data.readlong
+			crc  = data.readlong unless data.eos?
 		end
 
 		def parse_payload(data)
