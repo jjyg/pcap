@@ -44,7 +44,7 @@ module Pcap
 			@endianness = :little
 			case signature = readlong
 			when 0xa1b2c3d4
-			when 0xd4c3b2a1: @endianness = :big
+			when 0xd4c3b2a1; @endianness = :big
 			else raise "invalid signature #{'%x' % signature}"
 			end
 
@@ -158,9 +158,9 @@ module Pcap
 
 		def parse_payload(data)
 		       	case @proto
-			when 6: TCP.from(data)
-			when 17: UDP.from(data)
-			when 1: ICMP.from(data)
+			when 6; TCP.from(data)
+			when 17; UDP.from(data)
+			when 1; ICMP.from(data)
 			else super(data)
 			end
 		end
