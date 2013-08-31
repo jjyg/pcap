@@ -126,7 +126,7 @@ module Pcap
 		end
 
 		def parse_payload(data)
-			IP.from data
+			IPAuto.from data
 		end
 
 		def inspect
@@ -135,12 +135,25 @@ module Pcap
 	end
 
 	class IP < Proto
-		attr_accessor :vers, :tos, :id, :flag, :frag, :ttl, :proto, :hcksum, :src, :dst, :opts, :pld
+	end
+
+	class IPAuto
+		def self.from(data)
+			case data.str[data.pos, 1].unpack('C').first >> 4
+			when 4; IPv4.from(data)
+			when 6; IPv6.from(data)
+			else data
+			end
+		end
+	end
+
+	class IPv4 < IP
+		attr_accessor :vers, :hdrlen, :tos, :id, :flag, :frag, :ttl, :proto, :hcksum, :src, :dst, :opts, :pld
 
 		def interpret(data)
 			b = data.readbyte
 			@vers = b >> 4
-			hdrlen = (b & 0xf) * 4
+			@hdrlen = (b & 0xf) * 4
 			@tos = data.readbyte
 			len = data.readshort
 			@id = data.readshort
@@ -152,7 +165,7 @@ module Pcap
 			@hcksum = data.readshort
 			@src = data.read(4).unpack('C*').join('.')
 			@dst = data.read(4).unpack('C*').join('.')
-			@opts = data.read(hdrlen-data.pos)
+			@opts = data.read(@hdrlen-data.pos)
 			@pld = parse_payload(data.readsub(len-data.pos))
 		end
 
@@ -166,7 +179,38 @@ module Pcap
 		end
 
 		def inspect
-			"<ip src=#@src dst=#@dst id=#{@id.h} flag=#@flag frag=#@frag ttl=#@ttl proto=#@proto tos=#@tos #{@opts.inspect if @opts.length > 0}\n#{@pld.inspect}>"
+			"<ip4 src=#@src dst=#@dst id=#{@id.h} flag=#@flag frag=#@frag ttl=#@ttl proto=#@proto tos=#@tos#{" hdrlen=#@hdrlen" if @hdrlen != 20}#{" opts="+@opts.inspect if @opts.length > 0}\n#{@pld.inspect}>"
+		end
+	end
+
+	class IPv6 < IP
+		attr_accessor :vers, :trafclass, :flowlabel, :proto, :ttl, :src, :dst, :headers, :pld
+
+		def interpret(data)
+			b = data.readlong
+			@vers = (b >> 28) & 0xf
+			@trafclass = (b >> 20) & 0xff
+			@flowlabel = b & 0xfffff
+			len = data.readshort
+			@proto = data.readbyte
+			@ttl = data.readbyte
+			@src = data.read(16).unpack('n*').map { |i| i.to_s(16) }.join(':')
+			@dst = data.read(16).unpack('n*').map { |i| i.to_s(16) }.join(':')
+			@headers = [] # TODO
+			@pld = parse_payload(data.readsub(len-data.pos))
+		end
+
+		def parse_payload(data)
+			case @proto
+			when 6; TCP.from(data)
+			when 17; UDP.from(data)
+			when 1; ICMP.from(data)
+			else super(data)
+			end
+		end
+
+		def inspect
+			"<ip6 src=#@src dst=#@dst tc=#@trafclass flow=#{@flowlabel.h} ttl=#@ttl proto=#@proto#{" headers="+@headers.inspect if @headers.length > 0}\n#{@pld.inspect}>"
 		end
 	end
 
@@ -192,7 +236,7 @@ module Pcap
 		end
 
 		def inspect
-			"<tcp sport=#@sport dport=#@dport seq=#{@seq.h} ack=#{@ack.h} flag=#{@flags.h}-#{flags_s*','} doff=#@doff #{@opts.inspect if @opts.length > 0}\n#{@pld.inspect}>"
+			"<tcp sport=#@sport dport=#@dport seq=#{@seq.h} ack=#{@ack.h} flag=#{@flags.h}-#{flags_s*','} doff=#@doff#{" opts="+@opts.inspect if @opts.length > 0}\n#{@pld.inspect}>"
 		end
 	end
 
