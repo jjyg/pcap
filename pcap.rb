@@ -5,7 +5,8 @@
 # License : wtfplv2 (zoy.org)
 
 class String ;  def h ; unpack('H*').first end end
-class Integer ; def h ; '0x%x' % self end end 
+class Integer ; def h ; '0x%x' % self end end
+class NilClass ; def h ; '' end end
 
 module Pcap
 	class Sbuf
@@ -73,7 +74,7 @@ module Pcap
 	end
 
 	class Packet
-		attr_accessor :length, :time, :eth
+		attr_accessor :length, :rawlen, :time, :eth
 
 		def self.read(cap)
 			p = new
@@ -84,9 +85,9 @@ module Pcap
 		def read(cap)
 			@time = cap.readlong
 			@time += cap.readlong / 1_000_000.0
+			@rawlen = cap.readlong
 			@length = cap.readlong
-			rawlen = cap.readlong
-			@eth = interpret(Sbuf.new(cap.read(rawlen)))
+			@eth = interpret(Sbuf.new(cap.read(@rawlen)))
 		end
 
 		def interpret(data)
@@ -100,7 +101,7 @@ module Pcap
 		def icmp; pld if pld.kind_of?(ICMP) end
 
 		def inspect
-			"<pcap time=#@time-#{Time.at(@time).strftime('%d/%m/%Y %H:%M:%S') rescue nil} length=#@length\n#{@eth.inspect}>"
+			"<pcap time=#@time-#{Time.at(@time).strftime('%d/%m/%Y %H:%M:%S') rescue nil} length=#@length#{" caplen=#@rawlen" if @rawlen != @length}\n#{@eth.inspect}>"
 		end
 	end
 
@@ -139,6 +140,7 @@ module Pcap
 
 	class IPAuto
 		def self.from(data)
+			return if data.eos?
 			case data.str[data.pos, 1].unpack('C').first >> 4
 			when 4; IPv4.from(data)
 			when 6; IPv6.from(data)
@@ -151,21 +153,21 @@ module Pcap
 		attr_accessor :vers, :hdrlen, :tos, :id, :flag, :frag, :ttl, :proto, :hcksum, :src, :dst, :opts, :pld
 
 		def interpret(data)
-			b = data.readbyte
+			b = data.readbyte || 0
 			@vers = b >> 4
-			@hdrlen = (b & 0xf) * 4
+			hdrlen = (b & 0xf) * 4
 			@tos = data.readbyte
-			len = data.readshort
+			len = data.readshort || 0
 			@id = data.readshort
 			@frag = data.readshort
-			@flag = @frag >> 13
+			@flag = @frag >> 13 if @frag
 			@frag &= 0x1fff
 			@ttl = data.readbyte
 			@proto = data.readbyte
 			@hcksum = data.readshort
-			@src = data.read(4).unpack('C*').join('.')
-			@dst = data.read(4).unpack('C*').join('.')
-			@opts = data.read(@hdrlen-data.pos)
+			@src = data.read(4).to_s.unpack('C*').join('.')
+			@dst = data.read(4).to_s.unpack('C*').join('.')
+			@opts = data.read(hdrlen-data.pos)
 			@pld = parse_payload(data.readsub(len-data.pos))
 		end
 
@@ -217,7 +219,7 @@ module Pcap
 	class TCP < Proto
 		attr_accessor :sport, :dport, :seq, :ack, :doff, :flags, :wsz, :cksum, :urgent, :opts, :pld
 
-		def interpret(data)	
+		def interpret(data)
 			@sport = data.readshort
 			@dport = data.readshort
 			@seq = data.readlong
@@ -243,12 +245,20 @@ module Pcap
 	class UDP < Proto
 		attr_accessor :sport, :dport, :cksum, :pld
 
-		def interpret(data)	
+		def interpret(data)
 			@sport = data.readshort
 			@dport = data.readshort
 			len = data.readshort
 			@cksum = data.readshort
 			@pld = parse_payload(data.readsub(len-8))
+		end
+
+		def parse_payload(data)
+			if [@sport, @dport].sort == [67, 68]
+				BOOTP.from(data)
+			else
+				super(data)
+			end
 		end
 
 		def inspect
@@ -270,6 +280,45 @@ module Pcap
 
 		def inspect
 			"<icmp type=#@type code=#@code id=#{@id.h} seq=#@seq\n#{@pld.inspect}>"
+		end
+	end
+
+	class BOOTP < Proto
+		attr_accessor :dhcp, :unk1, :cip, :yip, :nip, :gip, :unk2, :magic, :dhcpoptions
+
+		def interpret(data)
+			@unk1 = data.read(12)
+			@cip = data.read(4).to_s.unpack('C*').join('.')
+			@yip = data.read(4).to_s.unpack('C*').join('.')
+			@nip = data.read(4).to_s.unpack('C*').join('.')
+			@gip = data.read(4).to_s.unpack('C*').join('.')
+			@unk2 = data.read(236-12-4*4)
+			@magic = data.readlong
+			if @magic == 0x63825363
+				@dhcpoptions = []
+				until data.eos?
+					type = data.readbyte
+					len = data.readbyte
+					opt = data.readsub(len) if len
+					case type
+					when 0
+						next if len == 0
+					when 53
+						opt = opt.read
+						b = opt[0, 1].unpack('C')[0]
+						@dhcp = { 1 => 'dhcp discover', 2 => 'dhcp offer', 3 => 'dhcp request', 5 => 'dhcp ack' }[b[1]]
+						opt = opt.inspect
+					else
+						opt = opt.read.inspect if len
+					end
+					@dhcpoptions << [type, opt]
+				end
+			end
+		end
+
+		def inspect
+			opts = @dhcpoptions.sort_by { |t, d| t }.map { |t, d| "#{t}=#{d}" } if dhcpoptions
+			"<#{@dhcp || 'bootp'} cip=#@cip yip=#@yip nip=#@nip gip=#@gip#{" dhcp_opts=[#{opts.join(', ')}]" if opts}>"
 		end
 	end
 
@@ -329,7 +378,7 @@ Then there are two integers on two byte which represent the major and the minor 
 An integer on 4 bytes which contains the time zone in relation with Greenwich.
 An integer on 4 bytes which contains the file length.
 An integer on 4 bytes reserved for future applications.
-An integer on 4 bytes describes the link (Ethernet, ...). Complete mapping can be found into bpf.h file, into the WinPcap source pack. Here it it a table which show the values which this number can have and their meanings: 
+An integer on 4 bytes describes the link (Ethernet, ...). Complete mapping can be found into bpf.h file, into the WinPcap source pack. Here it it a table which show the values which this number can have and their meanings:
 
 Value                        	Description
 0 	no link-layer encapsulation
@@ -357,7 +406,7 @@ Micro seconds from the capture beginning
 An integer on 4 bytes for the packet length.
 An integer on 4 bytes for the length of the packet part contained in the file. In fact can happen that the capture file does not contain the whole packet.
 An integer on 4 bytes keeps the seconds number passed since the capture beginning until when the packet was captured.
-An integer on 4 bytes keeps the microseconds number passed since the capture beginning until when the packet was captured. 
+An integer on 4 bytes keeps the microseconds number passed since the capture beginning until when the packet was captured.
 
 // jj: from net2pcap.c, timestamp comes first
 network packet formats from wikipedia
