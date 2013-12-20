@@ -127,7 +127,7 @@ module Pcap
 		end
 
 		def parse_payload(data)
-			IPAuto.from data
+			IPAuto.from(data) || super(data)
 		end
 
 		def inspect
@@ -144,7 +144,6 @@ module Pcap
 			case data.str[data.pos, 1].unpack('C').first >> 4
 			when 4; IPv4.from(data)
 			when 6; IPv6.from(data)
-			else data
 			end
 		end
 	end
@@ -155,7 +154,7 @@ module Pcap
 		def interpret(data)
 			b = data.readbyte || 0
 			@vers = b >> 4
-			hdrlen = (b & 0xf) * 4
+			@hdrlen = (b & 0xf) * 4
 			@tos = data.readbyte
 			len = data.readshort || 0
 			@id = data.readshort
@@ -167,7 +166,7 @@ module Pcap
 			@hcksum = data.readshort
 			@src = data.read(4).to_s.unpack('C*').join('.')
 			@dst = data.read(4).to_s.unpack('C*').join('.')
-			@opts = data.read(hdrlen-data.pos)
+			@opts = data.read(@hdrlen-data.pos)
 			@pld = parse_payload(data.readsub(len-data.pos))
 		end
 
