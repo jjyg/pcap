@@ -9,11 +9,20 @@ class Integer ; def h ; '0x%x' % self end end
 class NilClass ; def h ; '' end end
 
 module Pcap
+	module ReadInts
+		def readlonglong; @endianness == :big ? ((readlong << 32) | readlong) : (readlong | (readlong << 32)) end
+		def readlong;   read(4).unpack(@endianness == :big ? 'N' : 'V').first end
+		def readshort;  read(2).unpack(@endianness == :big ? 'n' : 'v').first end
+		def readbyte ;  read(1).unpack('C').first end
+	end
+
 	class Sbuf
-		attr_accessor :pos, :str
-		def initialize(str)
+		attr_accessor :pos, :str, :endianness
+		include ReadInts
+		def initialize(str, endianness = :big)
 			@pos = 0
 			@str = str
+			@endianness = endianness
 		end
 		def read(len=-1)
 			puts "short string!" if $VERBOSE and eos? and len > 0
@@ -25,9 +34,6 @@ module Pcap
 		def readsub(len=-1)
 			self.class.new(read(len))
 		end
-		def readbyte ;  read(1).unpack('C').first end
-		def readshort ; read(2).unpack('n').first end
-		def readlong ;  read(4).unpack('N').first end
 		def eos? ; @pos >= @str.length end
 	end
 
@@ -38,8 +44,11 @@ module Pcap
 			c
 		end
 
+		def initialize ; end
+
 		attr_accessor :io, :endianness, :version, :tz, :filelen, :futureap, :linktype
 
+		include ReadInts
 		def from(io)
 			@io = io
 			@endianness = :little
@@ -55,26 +64,19 @@ module Pcap
 			@futureap = readlong
 			@linktype = readlong
 			@linktype = :eth if @linktype == 1
+			@linktype = :usb if @linktype == 220
 		end
 
 		def readpacket
 			Packet.read(self)
 		end
 
-		def readlong
-			@io.read(4).unpack(@endianness == :big ? 'N' : 'V').first
-		end
-		def readshort
-			@io.read(2).unpack(@endianness == :big ? 'n' : 'v').first
-		end
-		def read(len)
-			@io.read(len)
-		end
+		def read(len); @io.read(len) end
 		def eof? ; @io.closed? or @io.eof?  end
 	end
 
 	class Packet
-		attr_accessor :length, :rawlen, :time, :eth
+		attr_accessor :cap, :length, :rawlen, :time, :pld
 
 		def self.read(cap)
 			p = new
@@ -83,25 +85,32 @@ module Pcap
 		end
 
 		def read(cap)
+			@cap = cap
 			@time = cap.readlong
 			@time += cap.readlong / 1_000_000.0
 			@rawlen = cap.readlong
 			@length = cap.readlong
-			@eth = interpret(Sbuf.new(cap.read(@rawlen)))
+			endian = :little
+			endian = @cap.endianness if @cap.linktype == :usb
+			@pld = interpret(Sbuf.new(cap.read(@rawlen), endian))
 		end
 
 		def interpret(data)
-			Ethernet.from(data)
+			case @cap.linktype
+			when :eth; Ethernet.from(data)
+			when :usb; USB.from(data)
+			else data.read
+			end
 		end
 
-		def ip; eth.ip end
-		def pld; eth.ip.pld end
-		def tcp; pld if pld.kind_of?(TCP) end
-		def udp; pld if pld.kind_of?(UDP) end
-		def icmp; pld if pld.kind_of?(ICMP) end
+		def ip; pld.pld if pld.pld.kind_of?(IP) end
+		def tcp; pld.pld.pld if ip and pld.pld.pld.kind_of?(TCP) end
+		def udp; pld.pld.pld if ip and pld.pld.pld.kind_of?(UDP) end
+		def icmp; pld.pld.pld if ip and pld.pld.pld.kind_of?(ICMP) end
+		def usb; pld if pld.kind_of?(USB) end
 
 		def inspect
-			"<pcap time=#@time-#{Time.at(@time).strftime('%d/%m/%Y %H:%M:%S') rescue nil} length=#@length#{" caplen=#@rawlen" if @rawlen != @length}\n#{@eth.inspect}>"
+			"<pcap time=#@time-#{Time.at(@time).strftime('%d/%m/%Y %H:%M:%S') rescue nil} length=#@length#{" caplen=#@rawlen" if @rawlen != @length}\n#{@pld.inspect}>"
 		end
 	end
 
@@ -117,12 +126,12 @@ module Pcap
 	end
 
 	class Ethernet < Proto
-		attr_accessor :src, :dst, :type, :ip, :crc
+		attr_accessor :src, :dst, :type, :pld, :crc
 		def interpret(data)
 			@src  = data.read(6).h.scan(/../).join(':')
 			@dst  = data.read(6).h.scan(/../).join(':')
 			@type = data.readshort
-			@ip   = parse_payload(data.readsub) #readsub(-5)
+			@pld  = parse_payload(data.readsub) #readsub(-5)
 			@crc  = data.readlong unless data.eos?
 		end
 
@@ -131,7 +140,7 @@ module Pcap
 		end
 
 		def inspect
-			"<eth src=#@src dst=#@dst type=#{@type.h}\n#{@ip.inspect}>"
+			"<eth src=#@src dst=#@dst type=#{@type.h}\n#{@pld.inspect}>"
 		end
 	end
 
@@ -318,6 +327,35 @@ module Pcap
 		def inspect
 			opts = @dhcpoptions.sort_by { |t, d| t }.map { |t, d| "#{t}=#{d}" } if dhcpoptions
 			"<#{@dhcp || 'bootp'} cip=#@cip yip=#@yip nip=#@nip gip=#@gip#{" dhcp_opts=[#{opts.join(', ')}]" if opts}>"
+		end
+	end
+
+	class USB < Proto
+		attr_accessor :id, :pld
+		def interpret(data)
+			@id   = data.readlong | (data.readlong << 32)
+			@type = data.readbyte
+			@xfer_type = data.readbyte
+			@epnum = data.readbyte
+			@devnum = data.readbyte
+			@busnum = data.readshort
+			@flag_setup = data.readbyte
+			@flag_data = data.readbyte
+			@ts_sec = data.readlong | (data.readlong << 32)
+			@ts_usec = data.readlong
+			@status = data.readlong
+			@length = data.readlong
+			@len_cap = data.readlong
+			@setup = data.read(8)
+			@interval = data.readlong
+			@startframe = data.readlong
+			@xfer_flag = data.readlong
+			@ndesc = data.readlong
+			@pld = data.read(@len_cap)
+		end
+
+		def inspect
+			"<usb id=#{@id.h} type=#@type status=#{@status.h}\n#{@pld.inspect}>"
 		end
 	end
 
