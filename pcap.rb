@@ -331,19 +331,21 @@ module Pcap
 	end
 
 	class USB < Proto
-		attr_accessor :id, :pld
+		attr_accessor :id, :type, :xfer_type, :epnum, :devnum, :busnum, :flag_setup, :flag_data, :ts_sec, :ts_usec,
+				:status, :length, :len_cap, :setup, :interval, :startframe, :xfer_flag, :ndesc, :pld
 		def interpret(data)
-			@id   = data.readlong | (data.readlong << 32)
-			@type = data.readbyte
+			@id   = data.readlonglong
+			@type = data.readbyte.chr.inspect[1...-1]
 			@xfer_type = data.readbyte
 			@epnum = data.readbyte
 			@devnum = data.readbyte
 			@busnum = data.readshort
 			@flag_setup = data.readbyte
 			@flag_data = data.readbyte
-			@ts_sec = data.readlong | (data.readlong << 32)
+			@ts_sec = data.readlonglong
 			@ts_usec = data.readlong
 			@status = data.readlong
+			@status = @status - (1 << 32) if @status > 0xfff00000
 			@length = data.readlong
 			@len_cap = data.readlong
 			@setup = data.read(8)
@@ -354,8 +356,12 @@ module Pcap
 			@pld = data.read(@len_cap)
 		end
 
+		def endpoint
+			"#@busnum:#@devnum:#@epnum"
+		end
+
 		def inspect
-			"<usb id=#{@id.h} type=#@type status=#{@status.h}\n#{@pld.inspect}>"
+			"<usb id=#{@id.h} type=#@type xf=#@xfer_type ep=#{endpoint} status=#@status\n#{@pld.inspect}>"
 		end
 	end
 
