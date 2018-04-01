@@ -89,6 +89,7 @@ module Pcap
 		end
 
 		def readpacket
+			return if eof?
 			PacketLegacy.read(self)
 		end
 
@@ -178,6 +179,7 @@ module Pcap
 		end
 
 		def readpacket
+			return if eof?
 			case block_type = readlong
 			when 0x0a0d0d0a	# section header
 				parse_shdr
@@ -192,7 +194,7 @@ module Pcap
 				PacketNG.read(self, read_block('packet'))
 			else
 				blk = read_block("unk_#{block_type}")
-				puts "pcapng unhandled block type #{block_type} len #{blk.length}" if $VERBOSE
+				puts "pcapng unhandled block type #{block_type} len #{blk.str.length}" if $VERBOSE
 				return readpacket
 			end
 		end
@@ -274,7 +276,7 @@ module Pcap
 		end
 
 		def inspect
-			"<pcap length=#@length\n#{@pld.inspect}>"
+			"<pcapng if=#@iface_id ts=#@ts length=#@length\n#{@pld.inspect}>"
 		end
 	end
 
