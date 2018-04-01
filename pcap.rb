@@ -13,13 +13,16 @@ module Pcap
 		def readlonglong; @endianness == :big ? ((readlong << 32) | readlong) : (readlong | (readlong << 32)) end
 		def readlong;   read(4).unpack(@endianness == :big ? 'N' : 'V').first end
 		def readshort;  read(2).unpack(@endianness == :big ? 'n' : 'v').first end
-		def readbyte ;  read(1).unpack('C').first end
+		def readbyte;   read(1).unpack('C').first end
+		def readsub(len=-1, endianness = :big) ; Sbuf.new(read(len), endianness) end
 	end
 
 	class Sbuf
-		attr_accessor :pos, :str, :endianness
 		include ReadInts
-		def initialize(str, endianness = :big)
+
+		attr_accessor :pos, :str, :endianness
+
+		def initialize(str, endianness)
 			@pos = 0
 			@str = str
 			@endianness = endianness
@@ -31,24 +34,44 @@ module Pcap
 			@pos += len
 			@str[@pos-len, len].to_s
 		end
-		def readsub(len=-1)
-			self.class.new(read(len))
+		def align(nr=4)
+			# skip bytes until fptr is aligned to nr bytes
+			@pos += nr - (@pos % nr) if @pos % nr != 0
 		end
 		def eos? ; @pos >= @str.length end
 	end
 
 	class Capture
 		def self.from(io)
-			c = new
+			cls = CaptureLegacy
+			cls = CaptureNG if io.read(4).unpack('N').first == 0x0a0d0d0a
+			io.pos -= 4
+			c = cls.new
 			c.from(io)
 			c
 		end
 
+		include ReadInts
+
+		attr_accessor :io, :endianness
+
 		def initialize ; end
 
-		attr_accessor :io, :endianness, :version, :tz, :filelen, :futureap, :linktype
+		def parse_linktype(type)
+			case type
+			when 1; :eth
+			when 220; :usb
+			else type
+			end
+		end
 
-		include ReadInts
+		def read(len); @io.read(len) end
+		def eof? ; @io.closed? or @io.eof?  end
+	end
+
+	class CaptureLegacy < Capture
+		attr_accessor :version, :tz, :filelen, :futureap, :linktype
+
 		def from(io)
 			@io = io
 			@endianness = :little
@@ -62,41 +85,130 @@ module Pcap
 			@tz = readlong
 			@filelen = readlong
 			@futureap = readlong
-			@linktype = readlong
-			@linktype = :eth if @linktype == 1
-			@linktype = :usb if @linktype == 220
+			@linktype = parse_linktype(readlong)
 		end
 
 		def readpacket
-			Packet.read(self)
+			PacketLegacy.read(self)
 		end
 
-		def read(len); @io.read(len) end
-		def eof? ; @io.closed? or @io.eof?  end
+		def get_linktype(pkt)
+			@linktype
+		end
+	end
+
+	class CaptureNG < Capture
+		attr_accessor :shdrs
+
+		def from(io)
+			@io = io
+			@endianness = :little
+			@shdrs = []
+			case signature = readlong
+			when 0x0a0d0d0a; parse_shdr
+			else raise "invalid signature #{'%x' % signature}"
+			end
+		end
+
+		def shdr
+			@shdrs.last
+		end
+
+		def get_linktype(pkt)
+			shdr[:ifaces][pkt.iface_id][:linktype]
+		end
+
+		def read_block(name)
+			len = readlong
+			block = readsub(len - 12, @endianness)
+			@io.read(4-(len%4)) if len % 4 != 0
+			end_len = readlong
+			raise "block #{name} len error #{len} #{end_len}" if end_len != len or len < 12
+			block
+		end
+
+		def read_opts(blk)
+			until blk.eos?
+				opt_code = blk.readshort
+				opt_len = blk.readshort
+				opt_data = blk.read(opt_len)
+				blk.align(4)
+				yield opt_code, opt_data
+			end
+		end
+
+		def parse_shdr
+			shdr = {}
+			@shdrs << shdr
+			@endianness = :little
+			readlong	# header length, but we dont know endianness yet
+			case signature = readlong
+			when 0xa1b2c3d4
+			when 0xd4c3b2a1; @endianness = :big
+			end
+
+			# go back to read hdrlen
+			@io.pos -= 8
+			blk = read_block('section header')
+
+			# skip endianness
+			blk.readlong
+			shdr[:version_major] = blk.readshort
+			shdr[:version_minor] = blk.readshort
+			shdr[:section_size]  = blk.readlonglong
+			shdr[:options] = []
+			shdr[:ifaces] = []
+			read_opts(blk) { |opt_code, opt_data|
+				opt_code = %w[eoc comment hardware os userapp][opt_code] || opt_code
+				shdr[:options] << [opt_code, opt_data]
+			}
+		end
+
+		def parse_iface(blk)
+			iface = {}
+			shdr[:ifaces] << iface
+			iface[:linktype] = parse_linktype(blk.readshort)
+			iface[:resv] = blk.readshort
+			iface[:snaplen] = blk.readlong
+			iface[:options] = []
+			read_opts(blk) { |opt_code, opt_data|
+				opt_code = %w[eoc comment name descr ipv4 ipv6 mac eui speed tsresol tzone filter os fcslen tsoffset][opt_code] || opt_code
+				iface[:options] << [opt_code, opt_data]
+			}
+		end
+
+		def readpacket
+			case block_type = readlong
+			when 0x0a0d0d0a	# section header
+				parse_shdr
+				return readpacket
+			when 1	# interface description
+				parse_iface(read_block('interface'))
+				return readpacket
+			when 2, 6
+				# 2 is legacy PacketNGBlock, almost identical to 6
+				PacketNGEnhanced.read(self, read_block('epacket'))
+			when 3
+				PacketNG.read(self, read_block('packet'))
+			else
+				blk = read_block("unk_#{block_type}")
+				puts "pcapng unhandled block type #{block_type} len #{blk.length}" if $VERBOSE
+				return readpacket
+			end
+		end
 	end
 
 	class Packet
-		attr_accessor :cap, :length, :rawlen, :time, :pld
+		attr_accessor :cap, :pld
 
-		def self.read(cap)
+		def self.read(*a)
 			p = new
-			p.read(cap)
+			p.read(*a)
 			p
 		end
 
-		def read(cap)
-			@cap = cap
-			@time = cap.readlong
-			@time += cap.readlong / 1_000_000.0
-			@rawlen = cap.readlong
-			@length = cap.readlong
-			endian = :little
-			endian = @cap.endianness if @cap.linktype == :usb
-			@pld = interpret(Sbuf.new(cap.read(@rawlen), endian))
-		end
-
 		def interpret(data)
-			case @cap.linktype
+			case @cap.get_linktype(self)
 			when :eth; Ethernet.from(data)
 			when :usb; USB.from(data)
 			else data.read
@@ -108,9 +220,61 @@ module Pcap
 		def udp; pld.pld.pld if ip and pld.pld.pld.kind_of?(UDP) end
 		def icmp; pld.pld.pld if ip and pld.pld.pld.kind_of?(ICMP) end
 		def usb; pld if pld.kind_of?(USB) end
+	end
+
+	class PacketLegacy < Packet
+		attr_accessor :length, :rawlen, :time
+
+		def read(cap)
+			@cap = cap
+			@time = cap.readlong
+			@time += cap.readlong / 1_000_000.0
+			@rawlen = cap.readlong
+			@length = cap.readlong
+			endian = :little
+			endian = @cap.endianness if @cap.get_linktype(self) == :usb
+			@pld = interpret(readsub(@rawlen, endian))
+		end
 
 		def inspect
 			"<pcap time=#@time-#{Time.at(@time).strftime('%d/%m/%Y %H:%M:%S') rescue nil} length=#@length#{" caplen=#@rawlen" if @rawlen != @length}\n#{@pld.inspect}>"
+		end
+	end
+
+	class PacketNG < Packet
+		attr_accessor :length
+		def read(cap, blk)
+			@cap = cap
+			@length = blk.readlong
+			@pld = interpret(blk.readsub)
+		end
+
+		def iface_id ; 0 ; end
+
+		def inspect
+			"<pcap length=#@length\n#{@pld.inspect}>"
+		end
+	end
+
+	class PacketNGEnhanced < Packet
+		attr_accessor :iface_id, :ts, :caplen, :length, :opts
+		def read(cap, blk)
+			@cap = cap
+			@iface_id = blk.readlong
+			@ts = (blk.readlong << 32) | blk.readlong
+			@caplen = blk.readlong
+			@length = blk.readlong
+			@pld = interpret(blk.readsub(@caplen))
+			blk.align(4)
+			@opts = []
+			@cap.read_opts(blk) { |opt_code, opt_data|
+				opt_code = %w[eoc comment flags hash dropcount][opt_code] || opt_code
+				@opts << [opt_code, opt_data]
+			}
+		end
+
+		def inspect
+			"<pcap length=#@length\n#{@pld.inspect}>"
 		end
 	end
 
@@ -120,6 +284,7 @@ module Pcap
 			n.interpret(str)
 			n
 		end
+
 		def parse_payload(data)
 			data.read
 		end
@@ -241,6 +406,7 @@ module Pcap
 			@opts = data.read(doff-data.pos)
 			@pld = parse_payload(data.readsub)
 		end
+
 		def flags_s
 			i = -1 ; %w[fin syn rst psh ack urg ece cwr].find_all { @flags[i+=1] > 0 }
 		end
