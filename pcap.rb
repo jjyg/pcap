@@ -239,7 +239,7 @@ module Pcap
 		end
 
 		def inspect
-			"<pcap time=#@time-#{Time.at(@time).strftime('%d/%m/%Y %H:%M:%S') rescue nil} length=#@length#{" caplen=#@rawlen" if @rawlen != @length}\n#{@pld.inspect}>"
+			"<pcap time=#@time-#{Time.at(@time).strftime('%Y-%m-%d %H:%M:%S') rescue nil} length=#@length#{" caplen=#@rawlen" if @rawlen != @length}\n#{@pld.inspect}>"
 		end
 	end
 
@@ -432,6 +432,8 @@ module Pcap
 		def parse_payload(data)
 			if [@sport, @dport].sort == [67, 68]
 				BOOTP.from(data)
+			elsif @sport == 53 or @dport == 53
+				DNS.from(data)
 			else
 				super(data)
 			end
@@ -530,6 +532,121 @@ module Pcap
 
 		def inspect
 			"<usb id=#{@id.h} type=#@type xf=#@xfer_type ep=#{endpoint} status=#@status\n#{@pld.inspect}>"
+		end
+	end
+
+	class DNS < Proto
+		# https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml
+		attr_accessor :id, :hdrflags, :query, :answer, :ns, :additional
+		DNSTYPE = { 1 => 'A', 28 => 'AAAA', 2 => 'NS', 5 => 'CNAME', 6 => 'SOA', 15 => 'MX', 16 => 'TXT' }
+
+		def interpret_name(data, seen_ptr={})
+			name = ''
+			loop {
+				slen = data.readbyte
+				break if slen == 0
+				if slen & 0xc0 == 0xc0
+					# pointer
+					off = ((slen & 0x3f) << 8) | data.readbyte
+					break if seen_ptr[off]
+					seen_ptr[off] = true
+					dcopy = data.dup
+					dcopy.pos = off
+					name << interpret_name(dcopy, seen_ptr)
+					break
+				else
+					name << data.read(slen) << '.'
+				end
+			}
+			name
+		end
+
+		def interpret_query(data)
+			h = {}
+			h[:name] = interpret_name(data)
+			h[:type] = data.readshort
+			h[:class] = data.readshort	# 1 internet
+
+			h[:type] = DNSTYPE[h[:type]] || h[:type]
+			h
+		end
+
+		def interpret_answer(data)
+			h = interpret_query(data)
+
+			h[:ttl] = data.readlong		# seconds
+			rdlen = data.readshort
+
+			case h[:type]
+			when 'A'
+				if rdlen == 4
+					h[:rdata] = data.read(4).unpack('C*').join('.')
+				end
+			when 'CNAME'
+				h[:rdata] = interpret_name(data)
+			end
+			h[:rdata] ||= data.read(rdlen)
+
+			h
+		end
+
+		def interpret(data)
+			@id = data.readshort	# pair rq and responses
+			moo = data.readshort
+			@hdrflags = {}
+			@hdrflags[:rcode] = moo & 15 ; moo >>= 4	# response code
+			@hdrflags[:cd] = (moo & 1 == 1) ; moo >>= 1	# checking disabled
+			@hdrflags[:ad] = (moo & 1 == 1) ; moo >>= 1	# authentic data
+			@hdrflags[:z] = moo & 1 ; moo >>= 1	# reserved
+			@hdrflags[:ra] = (moo & 1 == 1) ; moo >>= 1	# recursion available
+			@hdrflags[:rd] = (moo & 1 == 1) ; moo >>= 1	# recursion desired
+			@hdrflags[:tc] = (moo & 1 == 1) ; moo >>= 1	# truncation
+			@hdrflags[:aa] = (moo & 1 == 1) ; moo >>= 1	# authoritative answer
+			@hdrflags[:opcode] = moo & 15 ; moo >>= 4	# 0 query
+			@hdrflags[:qr] = moo & 1 ; moo >>= 1	# 0 query, 1 response
+
+			@hdrflags[:qr] = { 0 => 'query', 1 => 'response' }[@hdrflags[:qr]]
+			@hdrflags[:rcode] = { 0 => 'noerror', 1 => 'fmterror', 2 => 'servfail', 3 => 'nxdomain', 4 => 'notimplem', 5 => 'refused' }[@hdrflags[:rcode]] || @hdrflags[:rcode]
+
+			nquery = data.readshort
+			nanswer = data.readshort
+			nns = data.readshort
+			nadd = data.readshort
+
+			@query = []
+			nquery.times { @query << interpret_query(data) }
+
+			@answer = []
+			nanswer.times { @answer << interpret_answer(data) }
+
+			@ns = []
+			nns.times { @ns << interpret_answer(data) }
+
+			@additional = []
+			nadd.times { @additional << interpret_answer(data) }
+		end
+
+		def inspect_inner(pfx, ary)
+			if ary.empty?
+				''
+			else
+				pfx + ary.map { |h|
+					if not h[:ttl]
+						out = "#{h[:type]} #{h[:name].inspect}"
+						out << " class #{h[:class]}" if h[:class] != 1
+					else
+						out = "#{h[:name].inspect} #{h[:type]}"
+						out << " class #{h[:class]}" if h[:class] != 1
+						out << " ttl #{h[:ttl]}"
+						out << " rdata #{h[:rdata].inspect}"
+					end
+					out
+				}.join(' ')
+			end
+		end
+
+		def inspect
+			"<dns #{@hdrflags[:qr]} id=#{@id.h} #{inspect_inner(' q: ', @query)} #{inspect_inner(' a: ', @answer)} #{inspect_inner(' ns: ', @ns)} #{inspect_inner(' add: ', @additional)}>"
 		end
 	end
 
