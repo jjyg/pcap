@@ -235,7 +235,7 @@ module Pcap
 			@length = cap.readlong
 			endian = :little
 			endian = @cap.endianness if @cap.get_linktype(self) == :usb
-			@pld = interpret(readsub(@rawlen, endian))
+			@pld = interpret(cap.readsub(@rawlen, endian))
 		end
 
 		def inspect
