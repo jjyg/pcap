@@ -552,9 +552,9 @@ module Pcap
 			@sig   = data.readlong
 			@tag   = data.readlong
 			@tlen  = data.readlong	# transfer length before next usbs
-			@flags = data.readlong	# bits 0-6 resvd, bit 7 direction (0 host -> dev, 1 dev -> host)
-			@lun   = data.readlong
-			@cblen = data.readlong
+			@flags = data.readbyte	# bits 0-6 resvd, bit 7 direction (0 host -> dev, 1 dev -> host)
+			@lun   = data.readbyte	# bits 4-7 resvd =0
+			@cblen = data.readbyte	# bits 5-7 resvd =0
 			@pld = parse_payload(data.readsub(@cblen))
 		end
 
