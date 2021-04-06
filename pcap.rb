@@ -14,7 +14,7 @@ module Pcap
 		def readlong;   read(4).unpack(@endianness == :big ? 'N' : 'V').first end
 		def readshort;  read(2).unpack(@endianness == :big ? 'n' : 'v').first end
 		def readbyte;   read(1).unpack('C').first end
-		def readsub(len=-1, endianness = :big) ; Sbuf.new(read(len), endianness) end
+		def readsub(len=-1, endianness=@endianness) ; Sbuf.new(read(len), endianness) end
 	end
 
 	class Sbuf
@@ -121,7 +121,7 @@ module Pcap
 
 		def read_block(name)
 			len = readlong
-			block = readsub(len - 12, @endianness)
+			block = readsub(len - 12)
 			@io.read(4-(len%4)) if len % 4 != 0
 			end_len = readlong
 			raise "block #{name} len error #{len} #{end_len}" if end_len != len or len < 12
@@ -298,7 +298,7 @@ module Pcap
 			@src  = data.read(6).h.scan(/../).join(':')
 			@dst  = data.read(6).h.scan(/../).join(':')
 			@type = data.readshort
-			@pld  = parse_payload(data.readsub) #readsub(-5)
+			@pld  = parse_payload(data.readsub(-1, :big)) #readsub(-5)
 			@crc  = data.readlong unless data.eos?
 		end
 
@@ -523,15 +523,58 @@ module Pcap
 			@startframe = data.readlong
 			@xfer_flag = data.readlong
 			@ndesc = data.readlong
-			@pld = data.read(@len_cap)
+			@pld = parse_payload(data.readsub(@len_cap))
 		end
 
 		def endpoint
 			"#@busnum:#@devnum:#@epnum"
 		end
 
+		def parse_payload(data)
+			if data.str.length == 31 and data.str[data.pos, 4] == 'USBC'
+				USBC.from(data)
+			elsif data.str.length == 13 and data.str[data.pos, 4] == 'USBS'
+				USBS.from(data)
+			else
+				super(data)
+			end
+		end
+
 		def inspect
 			"<usb id=#{@id.h} type=#@type xf=#@xfer_type ep=#{endpoint} status=#@status\n#{@pld.inspect}>"
+		end
+	end
+
+	class USBC < Proto
+		attr_accessor :sig, :tag, :tlen, :flags, :lun, :cblen, :pld
+
+		def interpret(data)
+			@sig   = data.readlong
+			@tag   = data.readlong
+			@tlen  = data.readlong	# transfer length before next usbs
+			@flags = data.readlong	# bits 0-6 resvd, bit 7 direction (0 host -> dev, 1 dev -> host)
+			@lun   = data.readlong
+			@cblen = data.readlong
+			@pld = parse_payload(data.readsub(@cblen))
+		end
+
+		def inspect
+			"<usbc tag=#{@tag.h} tlen=#@tlen flags=#{@flags.h} lun=#@lun\n#{@pld.inspect}>"
+		end
+	end
+
+	class USBS < Proto
+		attr_accessor :sig, :tag, :residue, :status
+
+		def interpret(data)
+			@sig     = data.readlong
+			@tag     = data.readlong
+			@residue = data.readlong	# diff between transfer length actual vs expected
+			@status  = data.readbyte
+		end
+
+		def inspect
+			"<usbs tag=#{@tag.h} residue=#@residue status=#@status>"
 		end
 	end
 
