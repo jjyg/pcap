@@ -218,6 +218,7 @@ module Pcap
 		end
 
 		def ip; pld.pld if pld.pld.kind_of?(IP) end
+		def arp; pld.pld if pld.pld.kind_of?(ARP) end
 		def tcp; pld.pld.pld if ip and pld.pld.pld.kind_of?(TCP) end
 		def udp; pld.pld.pld if ip and pld.pld.pld.kind_of?(UDP) end
 		def icmp; pld.pld.pld if ip and pld.pld.pld.kind_of?(ICMP) end
@@ -303,7 +304,12 @@ module Pcap
 		end
 
 		def parse_payload(data)
-			IPAuto.from(data) || super(data)
+			case @type
+			when 0x8;    IPv4.from(data)
+			when 0xdd86; IPv6.from(data)
+			when 0x608;  ARP.from(data)
+			else; IPAuto.from(data) || super(data)
+			end
 		end
 
 		def inspect
@@ -388,6 +394,40 @@ module Pcap
 
 		def inspect
 			"<ip6 src=#@src dst=#@dst tc=#@trafclass flow=#{@flowlabel.h} ttl=#@ttl proto=#@proto#{" headers="+@headers.inspect if @headers.length > 0}\n #{@pld.inspect.gsub("\n", "\n ")}>"
+		end
+	end
+
+	class ARP < Proto
+		attr_accessor :htype, :ptype, :hlen, :plen, :oper, :sha, :spa, :tha, :tpa
+
+		def interpret(data)
+			@htype = data.readshort
+			@ptype = data.readshort
+			@hlen = data.readbyte
+			@plen = data.readbyte
+			@oper = data.readshort
+			@sha = data.read(@hlen)
+			@spa = data.read(@plen)
+			@tha = data.read(@hlen)
+			@tpa = data.read(@plen)
+			if @htype == 1 and @hlen == 6
+				@sha = @sha.h.scan(/../).join(':')
+				@tha = @tha.h.scan(/../).join(':')
+			else
+				@sha = @sha.h
+				@tha = @tha.h
+			end
+			if @ptype == 0x800 and @plen == 4
+				@spa = @spa.unpack('C*').join('.')
+				@tpa = @tpa.unpack('C*').join('.')
+			else
+				@spa = @spa.h
+				@tpa = @tpa.h
+			end
+		end
+
+		def inspect
+			"<arp htype=#{@htype.h} ptype=#{@ptype.h} oper=#{{1 => 'request', 2 => 'reply'}.fetch(@oper, @oper.h)} sha=#@sha spa=#@spa tha=#@tha tpa=#@tpa>"
 		end
 	end
 
@@ -698,7 +738,11 @@ module Pcap
 	def self.dump_cli
 		abort "usage: #$0 <pcapfile>" if ARGV.empty?
 		p pc = Capture.from(ARGF)
-		p pc.readpacket until pc.eof?
+		until pc.eof?
+			pkt = pc.readpacket
+			next if block_given? and not yield(pkt)
+			p pkt
+		end
 	end
 end
 
