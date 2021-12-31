@@ -239,7 +239,7 @@ module Pcap
 		end
 
 		def inspect
-			"<pcap time=#@time-#{Time.at(@time).strftime('%Y-%m-%d %H:%M:%S') rescue nil} length=#@length#{" caplen=#@rawlen" if @rawlen != @length}\n#{@pld.inspect}>"
+			"<pcap time=#@time-#{Time.at(@time).strftime('%Y-%m-%d %H:%M:%S') rescue nil} length=#@length#{" caplen=#@rawlen" if @rawlen != @length}\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -254,7 +254,7 @@ module Pcap
 		def iface_id ; 0 ; end
 
 		def inspect
-			"<pcap length=#@length\n#{@pld.inspect}>"
+			"<pcap length=#@length\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -276,7 +276,7 @@ module Pcap
 		end
 
 		def inspect
-			"<pcapng if=#@iface_id ts=#@ts length=#@length\n#{@pld.inspect}>"
+			"<pcapng if=#@iface_id ts=#@ts length=#@length\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -307,7 +307,7 @@ module Pcap
 		end
 
 		def inspect
-			"<eth src=#@src dst=#@dst type=#{@type.h}\n#{@pld.inspect}>"
+			"<eth src=#@src dst=#@dst type=#{@type.h}\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -356,7 +356,7 @@ module Pcap
 		end
 
 		def inspect
-			"<ip4 src=#@src dst=#@dst id=#{@id.h} flag=#@flag frag=#@frag ttl=#@ttl proto=#@proto tos=#@tos#{" hdrlen=#@hdrlen" if @hdrlen != 20}#{" opts="+@opts.inspect if @opts.length > 0}\n#{@pld.inspect}>"
+			"<ip4 src=#@src dst=#@dst id=#{@id.h} flag=#@flag frag=#@frag ttl=#@ttl proto=#@proto tos=#@tos#{" hdrlen=#@hdrlen" if @hdrlen != 20}#{" opts="+@opts.inspect if @opts.length > 0}\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -387,7 +387,7 @@ module Pcap
 		end
 
 		def inspect
-			"<ip6 src=#@src dst=#@dst tc=#@trafclass flow=#{@flowlabel.h} ttl=#@ttl proto=#@proto#{" headers="+@headers.inspect if @headers.length > 0}\n#{@pld.inspect}>"
+			"<ip6 src=#@src dst=#@dst tc=#@trafclass flow=#{@flowlabel.h} ttl=#@ttl proto=#@proto#{" headers="+@headers.inspect if @headers.length > 0}\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -414,7 +414,7 @@ module Pcap
 		end
 
 		def inspect
-			"<tcp sport=#@sport dport=#@dport seq=#{@seq.h} ack=#{@ack.h} flag=#{@flags.h}-#{flags_s*','} doff=#@doff#{" opts="+@opts.inspect if @opts.length > 0}\n#{@pld.inspect}>"
+			"<tcp sport=#@sport dport=#@dport seq=#{@seq.h} ack=#{@ack.h} flag=#{@flags.h}-#{flags_s*','} doff=#@doff#{" opts="+@opts.inspect if @opts.length > 0}\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -440,7 +440,7 @@ module Pcap
 		end
 
 		def inspect
-			"<udp sport=#@sport dport=#@dport\n#{@pld.inspect}>"
+			"<udp sport=#@sport dport=#@dport\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -457,7 +457,7 @@ module Pcap
 		end
 
 		def inspect
-			"<icmp type=#@type code=#@code id=#{@id.h} seq=#@seq\n#{@pld.inspect}>"
+			"<icmp type=#@type code=#@code id=#{@id.h} seq=#@seq\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -480,6 +480,7 @@ module Pcap
 					opt = data.readsub(len) if len
 					case type
 					when 0
+						opt = opt.read.inspect if len
 						next if len == 0
 					when 53
 						opt = opt.read
@@ -541,7 +542,7 @@ module Pcap
 		end
 
 		def inspect
-			"<usb id=#{@id.h} type=#@type xf=#@xfer_type ep=#{endpoint} status=#@status\n#{@pld.inspect}>"
+			"<usb id=#{@id.h} type=#@type xf=#@xfer_type ep=#{endpoint} status=#@status\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -559,7 +560,7 @@ module Pcap
 		end
 
 		def inspect
-			"<usbc tag=#{@tag.h} tlen=#@tlen flags=#{@flags.h} lun=#@lun\n#{@pld.inspect}>"
+			"<usbc tag=#{@tag.h} tlen=#@tlen flags=#{@flags.h} lun=#@lun\n #{@pld.inspect.gsub("\n", "\n ")}>"
 		end
 	end
 
@@ -585,7 +586,7 @@ module Pcap
 
 		def interpret_name(data, seen_ptr={})
 			name = ''
-			loop {
+			until data.eos?
 				slen = data.readbyte
 				break if slen == 0
 				if slen & 0xc0 == 0xc0
@@ -600,7 +601,7 @@ module Pcap
 				else
 					name << data.read(slen) << '.'
 				end
-			}
+			end
 			name
 		end
 
@@ -667,10 +668,11 @@ module Pcap
 
 			@additional = []
 			nadd.times { @additional << interpret_answer(data) }
+		rescue
 		end
 
 		def inspect_inner(pfx, ary)
-			if ary.empty?
+			if not ary or ary.empty?
 				''
 			else
 				pfx + ary.map { |h|
