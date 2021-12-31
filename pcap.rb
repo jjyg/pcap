@@ -697,6 +697,8 @@ module Pcap
 			nns = data.readshort
 			nadd = data.readshort
 
+			return if nquery + nanswer + nns + nadd > data.str.length - data.pos
+
 			@query = []
 			nquery.times { @query << interpret_query(data) }
 
