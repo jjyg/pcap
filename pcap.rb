@@ -28,7 +28,7 @@ module Pcap
 			@endianness = endianness
 		end
 		def read(len=-1)
-			puts "short string!" if $VERBOSE and eos? and len > 0
+			puts "short string!" if $DEBUG and eos? and len > 0
 			# len < 0 -> read up to len (-1 = read all)
 			len = @str.length + len + 1 - @pos if len < 0
 			@pos += len
@@ -201,7 +201,7 @@ module Pcap
 	end
 
 	class Packet
-		attr_accessor :cap, :pld
+		attr_accessor :cap, :pld, :pldlen
 
 		def self.read(*a)
 			p = new
@@ -236,7 +236,8 @@ module Pcap
 			@length = cap.readlong
 			endian = :little
 			endian = @cap.endianness if @cap.get_linktype(self) == :usb
-			@pld = interpret(cap.readsub(@rawlen, endian))
+			@pldlen = @rawlen
+			@pld = interpret(cap.readsub(@pldlen, endian))
 		end
 
 		def inspect
@@ -249,7 +250,8 @@ module Pcap
 		def read(cap, blk)
 			@cap = cap
 			@length = blk.readlong
-			@pld = interpret(blk.readsub)
+			@pldlen = blk.str.length - blk.pos
+			@pld = interpret(blk.readsub(@pldlen))
 		end
 
 		def iface_id ; 0 ; end
@@ -267,7 +269,8 @@ module Pcap
 			@ts = (blk.readlong << 32) | blk.readlong
 			@caplen = blk.readlong
 			@length = blk.readlong
-			@pld = interpret(blk.readsub(@caplen))
+			@pldlen = @caplen
+			@pld = interpret(blk.readsub(@pldlen))
 			blk.align(4)
 			@opts = []
 			@cap.read_opts(blk) { |opt_code, opt_data|
@@ -294,12 +297,13 @@ module Pcap
 	end
 
 	class Ethernet < Proto
-		attr_accessor :src, :dst, :type, :pld, :crc
+		attr_accessor :src, :dst, :type, :pld, :crc, :pldlen
 		def interpret(data)
 			@src  = data.read(6).h.scan(/../).join(':')
 			@dst  = data.read(6).h.scan(/../).join(':')
 			@type = data.readshort
-			@pld  = parse_payload(data.readsub(-1, :big)) #readsub(-5)
+			@pldlen = data.str.length - data.pos	# -4 crc?
+			@pld  = parse_payload(data.readsub(@pldlen, :big))
 			@crc  = data.readlong unless data.eos?
 		end
 
@@ -331,7 +335,7 @@ module Pcap
 	end
 
 	class IPv4 < IP
-		attr_accessor :vers, :hdrlen, :tos, :id, :flag, :frag, :ttl, :proto, :hcksum, :src, :dst, :opts, :pld
+		attr_accessor :vers, :hdrlen, :tos, :id, :flag, :frag, :ttl, :proto, :hcksum, :src, :dst, :opts, :pld, :pldlen
 
 		def interpret(data)
 			b = data.readbyte || 0
@@ -349,7 +353,8 @@ module Pcap
 			@src = data.read(4).to_s.unpack('C*').join('.')
 			@dst = data.read(4).to_s.unpack('C*').join('.')
 			@opts = data.read(@hdrlen-data.pos)
-			@pld = parse_payload(data.readsub(len-data.pos))
+			@pldlen = len - data.pos
+			@pld = parse_payload(data.readsub(@pldlen))
 		end
 
 		def parse_payload(data)
@@ -367,7 +372,7 @@ module Pcap
 	end
 
 	class IPv6 < IP
-		attr_accessor :vers, :trafclass, :flowlabel, :proto, :ttl, :src, :dst, :headers, :pld
+		attr_accessor :vers, :trafclass, :flowlabel, :proto, :ttl, :src, :dst, :headers, :pld, :pldlen
 
 		def interpret(data)
 			b = data.readlong
@@ -380,7 +385,8 @@ module Pcap
 			@src = data.read(16).unpack('n*').map { |i| i.to_s(16) }.join(':')
 			@dst = data.read(16).unpack('n*').map { |i| i.to_s(16) }.join(':')
 			@headers = [] # TODO
-			@pld = parse_payload(data.readsub(len-data.pos))
+			@pldlen = len - data.pos
+			@pld = parse_payload(data.readsub(@pldlen))
 		end
 
 		def parse_payload(data)
@@ -432,7 +438,7 @@ module Pcap
 	end
 
 	class TCP < Proto
-		attr_accessor :sport, :dport, :seq, :ack, :doff, :flags, :wsz, :cksum, :urgent, :opts, :pld
+		attr_accessor :sport, :dport, :seq, :ack, :doff, :flags, :wsz, :cksum, :urgent, :opts, :pld, :pldlen
 
 		def interpret(data)
 			@sport = data.readshort
@@ -446,7 +452,8 @@ module Pcap
 			@cksum = data.readshort
 			@urgent = data.readshort
 			@opts = data.read(doff-data.pos)
-			@pld = parse_payload(data.readsub)
+			@pldlen = data.str.length - data.pos
+			@pld = parse_payload(data.readsub(@pldlen))
 		end
 
 		def flags_s
@@ -459,14 +466,15 @@ module Pcap
 	end
 
 	class UDP < Proto
-		attr_accessor :sport, :dport, :cksum, :pld
+		attr_accessor :sport, :dport, :cksum, :pld, :pldlen
 
 		def interpret(data)
 			@sport = data.readshort
 			@dport = data.readshort
 			len = data.readshort
 			@cksum = data.readshort
-			@pld = parse_payload(data.readsub(len-8))
+			@pldlen = len - 8
+			@pld = parse_payload(data.readsub(@pldlen))
 		end
 
 		def parse_payload(data)
@@ -485,7 +493,7 @@ module Pcap
 	end
 
 	class ICMP < Proto
-		attr_accessor :type, :code, :cksum, :id, :seq, :pld
+		attr_accessor :type, :code, :cksum, :id, :seq, :pld, :pldlen
 
 		def interpret(data)
 			@type = data.readbyte
@@ -493,7 +501,8 @@ module Pcap
 			@cksum = data.readshort
 			@id   = data.readshort
 			@seq  = data.readshort
-			@pld  = parse_payload(data.readsub)
+			@pldlen = data.str.length - data.pos
+			@pld  = parse_payload(data.readsub(@pldlen))
 		end
 
 		def inspect
@@ -543,7 +552,7 @@ module Pcap
 
 	class USB < Proto
 		attr_accessor :id, :type, :xfer_type, :epnum, :devnum, :busnum, :flag_setup, :flag_data, :ts_sec, :ts_usec,
-				:status, :length, :len_cap, :setup, :interval, :startframe, :xfer_flag, :ndesc, :pld
+				:status, :length, :len_cap, :setup, :interval, :startframe, :xfer_flag, :ndesc, :pld, :pldlen
 		def interpret(data)
 			@id   = data.readlonglong
 			@type = data.readbyte.chr.inspect[1...-1]
@@ -564,7 +573,8 @@ module Pcap
 			@startframe = data.readlong
 			@xfer_flag = data.readlong
 			@ndesc = data.readlong
-			@pld = parse_payload(data.readsub(@len_cap))
+			@pldlen = @len_cap
+			@pld = parse_payload(data.readsub(@pldlen))
 		end
 
 		def endpoint
@@ -587,7 +597,7 @@ module Pcap
 	end
 
 	class USBC < Proto
-		attr_accessor :sig, :tag, :tlen, :flags, :lun, :cblen, :pld
+		attr_accessor :sig, :tag, :tlen, :flags, :lun, :cblen, :pld, :pldlen
 
 		def interpret(data)
 			@sig   = data.readlong
@@ -596,7 +606,8 @@ module Pcap
 			@flags = data.readbyte	# bits 0-6 resvd, bit 7 direction (0 host -> dev, 1 dev -> host)
 			@lun   = data.readbyte	# bits 4-7 resvd =0
 			@cblen = data.readbyte	# bits 5-7 resvd =0
-			@pld = parse_payload(data.readsub(@cblen))
+			@pldlen = @cblen
+			@pld = parse_payload(data.readsub(@pldlen))
 		end
 
 		def inspect
@@ -737,9 +748,10 @@ module Pcap
 		end
 	end
 
-	def self.dump_cli
-		abort "usage: #$0 <pcapfile>" if ARGV.empty?
-		p pc = Capture.from(ARGF)
+	def self.dump_cli(fd=ARGF)
+		abort "usage: #$0 <pcapfile>" if not fd and ARGV.empty?
+		pc = Capture.from(fd)
+		p pc if $VERBOSE
 		until pc.eof?
 			pkt = pc.readpacket
 			next if block_given? and not yield(pkt)
@@ -749,6 +761,7 @@ module Pcap
 end
 
 if __FILE__ == $0
+	$VERBOSE = true
 	Pcap.dump_cli
 end
 
